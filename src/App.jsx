@@ -1,0 +1,363 @@
+import React, { useCallback, useEffect, useState } from 'react';
+import { createRoot } from 'react-dom/client';
+import ReactFlow, { Background, Controls, Handle, Position } from 'reactflow';
+import 'reactflow/dist/style.css';
+import DATA from './data.json';
+
+/**
+ * Builds a tree structure from raw hierarchical data
+ * @param {Array} rawData - Array of node objects with parent relationships
+ * @returns {Object} tree - Object where keys are node IDs and values are node objects with children
+ */
+function buildTree(rawData) {
+  const tree = {}; // Will store the final tree structure
+  const nodeInfo = {}; // Temporary storage for node names and descriptions
+  
+  // First pass: Extract all node information (name, description)
+  rawData.forEach(item => {
+    nodeInfo[item.id] = { 
+      name: item.name, 
+      description: item.description 
+    };
+  });
+   
+  // Second pass: Build the hierarchical relationships
+  rawData.forEach(item => {
+    // Get all parent levels sorted by level number (level-1, level-2, etc.)
+    const parentLevels = Object.keys(item.parent).sort((a, b) => 
+      parseInt(a.split('-')[1]) - parseInt(b.split('-')[1])
+    );
+    
+    let previousNodeId = null; // Track the parent of current node
+    
+    // Process each level in the hierarchy from root to leaf
+    parentLevels.forEach((levelKey, index) => {
+      const currentNodeId = item.parent[levelKey]; // Get node ID at this level
+      
+      // Create node if it doesn't exist in tree yet
+      if (!tree[currentNodeId]) {
+        // Get node info or use default values
+        const info = nodeInfo[currentNodeId] || { 
+          name: `Node ${currentNodeId}`, 
+          description: `Description for ${currentNodeId}` 
+        };
+        
+        // Initialize node with all necessary properties
+        tree[currentNodeId] = {
+          id: currentNodeId,              // Unique identifier
+          label: info.name,                // Display name
+          description: info.description,   // Node description
+          level: index,                    // Depth in hierarchy (0 = root)
+          parentId: previousNodeId,        // Reference to parent node
+          children: []                     // Array to store child node IDs
+        };
+      }
+      
+      // Link current node as a child of its parent
+      // Check if parent exists and child isn't already added
+      if (previousNodeId && !tree[previousNodeId].children.includes(currentNodeId)) {
+        tree[previousNodeId].children.push(currentNodeId);
+      }
+      
+      previousNodeId = currentNodeId; // Move down one level in hierarchy
+    });
+  });
+  
+  return tree;
+}
+
+/**
+ * Determines which nodes should be visible based on expand/collapse state
+ * @param {Object} tree - The complete tree structure
+ * @param {Set} expandedNodes - Set of node IDs that are currently expanded
+ * @returns {Set} visibleNodeIds - Set of node IDs that should be displayed
+ */
+function getVisibleNodes(tree, expandedNodes) {
+  // Find the root node (always at level 0)
+  const rootNode = Object.values(tree).find(node => node.level === 0);
+  if (!rootNode) return new Set(); // Return empty if no root found
+  
+  const visibleNodeIds = new Set(); // Will contain all visible node IDs
+  
+  /**
+   * Recursive function to traverse the tree and find visible nodes
+   * @param {string} nodeId - Current node being processed
+   */
+  function traverse(nodeId) {
+    visibleNodeIds.add(nodeId); // Current node is always visible
+    
+    // If this node is expanded, recursively process all its children
+    if (expandedNodes.has(nodeId)) {
+      tree[nodeId].children.forEach(childId => traverse(childId));
+    }
+    // If node is collapsed, its children are NOT added (remain hidden)
+  }
+  
+  traverse(rootNode.id); // Start traversal from root
+  return visibleNodeIds;
+}
+
+/**
+ * Calculates x,y positions for all nodes in the tree
+ * Uses a level-based layout: same level = same y-coordinate
+ * @param {Object} tree - The complete tree structure
+ * @returns {Object} positions - Object mapping node IDs to {x, y} coordinates
+ */
+function calculateLayout(tree) {
+  // Group nodes by their level (all nodes at same depth together)
+  const nodesByLevel = {};
+  Object.values(tree).forEach(node => {
+    if (!nodesByLevel[node.level]) {
+      nodesByLevel[node.level] = []; // Create array for this level if doesn't exist
+    }
+    nodesByLevel[node.level].push(node.id);
+  });
+  
+  const positions = {}; // Will store final positions
+  const verticalGap = 100;   // Space between levels (y-axis)
+  const horizontalGap = 110; // Space between siblings (x-axis)
+  
+  // Position each level horizontally centered
+  Object.entries(nodesByLevel).forEach(([level, nodeIds]) => {
+    nodeIds.sort(); // Sort for consistent left-to-right ordering
+    
+    // Calculate total width needed for this level
+    const totalWidth = (nodeIds.length - 1) * horizontalGap;
+    const startX = -totalWidth / 2; // Center around x=0
+    
+    // Assign position to each node in this level
+    nodeIds.forEach((nodeId, index) => {
+      positions[nodeId] = { 
+        x: startX + index * horizontalGap,  // Spread horizontally
+        y: Number(level) * verticalGap      // Stack vertically by level
+      };
+    });
+  });
+  
+  return positions;
+}
+
+/**
+ * Custom React component for rendering individual tree nodes
+ * @param {Object} data - Node data passed from ReactFlow
+ * 
+ * 
+ */
+function CustomNode({ data }) {
+  return (
+    <div
+      style={{
+        padding: '4px 8px',
+        border: '1px solid #555',
+        borderRadius: 4,
+        // Blue background if expanded, white if collapsed
+        background: data.isExpanded ? '#bfdeedff' : '#f7f1f1ff',
+        // Pointer cursor only if node has children (clickable)
+        cursor: data.hasChildren ? 'pointer' : 'default',
+        minWidth: 80,
+        maxWidth: 110,
+        textAlign: 'center',
+        fontSize: 8,
+        boxShadow: '0 1px 3px rgba(0,0,0,0.1)'
+      }}
+      // Only trigger toggle if node has children
+      onClick={data.hasChildren ? data.onToggle : undefined}
+    >
+      {/* Display node ID (e.g., "1.2.3") */}
+      <div style={{ fontWeight: 'bold', fontSize: 9, marginBottom: 2, color: '#222' }}>
+        {data.nodeId}
+      </div>
+      
+      {/* Display node name/label */}
+      <div style={{ fontSize: 10, color: '#444', marginBottom: 2 }}>
+        {data.label}
+      </div>
+      
+      {/* Display description if available */}
+      {data.description && (
+        <div style={{ fontSize: 9, color: '#666', fontStyle: 'Times New Roman', marginTop: 2 }}>
+          {data.description}
+        </div>
+      )}
+      
+      {/* Show expand/collapse indicator if node has children */}
+      {data.hasChildren && (
+        <div style={{ fontSize: 9, color: '#fdf9f9ff', marginTop: 3 }}>
+          {data.isExpanded ? '[-]' : '[+]'} {/* [-] = expanded, [+] = collapsed */}
+        </div>
+      )}
+      
+      {/* ReactFlow handles for connecting edges */}
+      <Handle type="target" position={Position.Top} />    {/* Incoming edge connection point */}
+      <Handle type="source" position={Position.Bottom} /> {/* Outgoing edge connection point */}
+    </div>
+  );
+}
+
+/**
+ * Main component that manages the hierarchical tree visualization
+ * Handles state management, user interactions, and rendering
+ */
+function HierarchyTree() {
+  // Track which nodes are expanded (showing children)
+  // Start with root node 'main' expanded by default
+  const [expandedNodes, setExpandedNodes] = useState(new Set(['main']));
+  
+  // ReactFlow state
+  const [nodes, setNodes] = useState([]);     // Nodes currently displayed
+  const [edges, setEdges] = useState([]);     // Edges (connections) between nodes
+
+  /**
+   * Expands all nodes in the tree
+   * User clicks "Expand All" button
+   */
+  const expandAll = () => {
+    const tree = buildTree(DATA);
+    const allNodeIds = new Set(Object.keys(tree)); // Get all node IDs
+    setExpandedNodes(allNodeIds); // Mark all as expanded
+  };
+
+  /**
+   * Collapses all nodes except the root
+   * User clicks "Collapse All" button
+   */
+  const collapseAll = () => {
+    setExpandedNodes(new Set(['main'])); // Only root remains expanded
+  };
+
+  /**
+   * Rebuilds the entire tree layout whenever expanded state changes
+   * This is the core function that converts data into visual representation
+   */
+  const rebuildTree = useCallback(() => {
+    // Step 1: Build tree structure from raw data
+    const tree = buildTree(DATA);
+    
+    // Step 2: Determine which nodes should be visible based on expand/collapse state
+    const visibleNodeIds = getVisibleNodes(tree, expandedNodes);
+    
+    // Step 3: Calculate positions for all nodes
+    const nodePositions = calculateLayout(tree);
+    
+    // Step 4: Create ReactFlow nodes and edges arrays
+    const reactFlowNodes = [];
+    const reactFlowEdges = [];
+    
+    // Convert tree structure to ReactFlow format
+    Object.values(tree).forEach(node => {
+      // Skip nodes that shouldn't be visible (collapsed parent)
+      if (!visibleNodeIds.has(node.id)) return;
+      
+      // Create a ReactFlow node
+      reactFlowNodes.push({
+        id: node.id,
+        type: 'custom',  // Use our CustomNode component
+        data: {
+          nodeId: node.id,
+          label: node.label,
+          description: node.description,
+          isExpanded: expandedNodes.has(node.id),      // Is this node expanded?
+          hasChildren: node.children.length > 0,       // Does it have children?
+          // Handler for expand/collapse toggle
+          onToggle: () => {
+            setExpandedNodes(prev => {
+              const updated = new Set(prev); // Clone current state
+              if (updated.has(node.id)) {
+                updated.delete(node.id); // Collapse: remove from expanded set
+              } else {
+                updated.add(node.id);    // Expand: add to expanded set
+              }
+              return updated;
+            });
+          }
+        },
+        position: nodePositions[node.id] // x, y coordinates
+      });
+      
+      // Create edge from parent to this node (if parent is visible)
+      if (node.parentId && visibleNodeIds.has(node.parentId)) {
+        reactFlowEdges.push({
+          id: `${node.parentId}-${node.id}`, // Unique edge ID
+          source: node.parentId,              // Parent node
+          target: node.id                     // Current node
+        });
+      }
+    });
+    
+    // Step 5: Update React state to trigger re-render
+    setNodes(reactFlowNodes);
+    setEdges(reactFlowEdges);
+  }, [expandedNodes]); // Re-run when expanded nodes change
+
+  // Rebuild tree on component mount and whenever expandedNodes changes
+  useEffect(() => { 
+    rebuildTree(); 
+  }, [rebuildTree]);
+
+  return (
+    <div style={{ width: '100vw', height: '100vh', position: 'relative' }}>
+      {/* Control buttons positioned at top-left */}
+      <div style={{ 
+        position: 'absolute', 
+        top: 10, 
+        left: 10, 
+        zIndex: 1000,      // Above ReactFlow canvas
+        display: 'flex',
+        gap: '10px'
+      }}>
+        {/* Expand All button */}
+        <button 
+          onClick={expandAll}
+          style={{
+            padding: '8px 16px',
+            backgroundColor: '#4CAF50',  // Green
+            color: 'white',
+            border: 'none',
+            borderRadius: '4px',
+            cursor: 'pointer',
+            fontSize: '14px',
+            fontWeight: 'bold',
+            boxShadow: '0 2px 4px rgba(0,0,0,0.2)'
+          }}
+        >
+          Expand All
+        </button>
+        
+        {/* Collapse All button */}
+        <button 
+          onClick={collapseAll}
+          style={{
+            padding: '8px 16px',
+            backgroundColor: '#f44336',  // Red
+            color: 'white',
+            border: 'none',
+            borderRadius: '4px',
+            cursor: 'pointer',
+            fontSize: '14px',
+            fontWeight: 'bold',
+            boxShadow: '0 2px 4px rgba(0,0,0,0.2)'
+          }}
+        >
+          Collapse All
+        </button>
+      </div>
+
+      {/* ReactFlow canvas - the main visualization area */}
+      <ReactFlow 
+        nodes={nodes}                         // Array of nodes to display
+        edges={edges}                         // Array of edges to display
+        nodeTypes={{ custom: CustomNode }}   // Register our custom node component
+        fitView                               // Auto-zoom to fit all nodes in view
+        minZoom={0.1}                         // Allow zooming out (10%)
+        maxZoom={2}                           // Allow zooming in (200%)
+      >
+        <Background />  {/* Grid background for visual reference */}
+        <Controls />    {/* Zoom and pan controls (bottom-left buttons) */}
+      </ReactFlow>
+    </div>
+  );
+}
+
+// Render the main component to the DOM
+// Finds element with id="root" and renders HierarchyTree inside it
+createRoot(document.getElementById('root')).render(<HierarchyTree />);
