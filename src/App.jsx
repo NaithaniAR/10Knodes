@@ -185,11 +185,14 @@ const HierarchyTree = React.memo(function HierarchyTree() {
   const [expandedNodes, setExpandedNodes] = useState(new Set(['main']));
   const [nodes, setNodes] = useState([]);
   const [edges, setEdges] = useState([]);
+  const [isLoading, setIsLoading] = useState(false);
+  const [loadProgress, setLoadProgress] = useState(0);
 
   const treeRef = useRef(null);
   const nodePositionsRef = useRef(null);
   const levelIndexRef = useRef(null);
   const [isPending, startTransition] = useTransition();
+  const animationFrameRef = useRef(null);
 
   useEffect(() => {
     treeRef.current = buildTree(DATA);
@@ -197,11 +200,13 @@ const HierarchyTree = React.memo(function HierarchyTree() {
     levelIndexRef.current = levelIndex;
   }, []);
 
+  // 🚀 LAZY LOADING: Render nodes in batches using RAF
   const buildNodesAndEdges = useCallback(
     (visibleNodeIds, tree, nodePositions) => {
-      const reactFlowNodes = [];
-      const reactFlowEdges = [];
+      const allNodes = [];
+      const allEdges = [];
 
+      // Collect all nodes first
       const maxLevel = Math.max(...Object.keys(levelIndex).map(Number));
       for (let level = 0; level <= maxLevel; level++) {
         if (!levelIndex[level]) continue;
@@ -212,7 +217,7 @@ const HierarchyTree = React.memo(function HierarchyTree() {
 
           if (!visibleNodeIds.has(nodeId)) continue;
 
-          reactFlowNodes.push({
+          allNodes.push({
             id: nodeId,
             type: 'custom',
             data: {
@@ -227,7 +232,7 @@ const HierarchyTree = React.memo(function HierarchyTree() {
           });
 
           if (node.parentId && visibleNodeIds.has(node.parentId)) {
-            reactFlowEdges.push({
+            allEdges.push({
               id: `${node.parentId}-${nodeId}`,
               source: node.parentId,
               target: nodeId,
@@ -236,8 +241,38 @@ const HierarchyTree = React.memo(function HierarchyTree() {
         }
       }
 
-      setNodes(reactFlowNodes);
-      setEdges(reactFlowEdges);
+      // Cancel previous animation frame
+      if (animationFrameRef.current) {
+        cancelAnimationFrame(animationFrameRef.current);
+      }
+
+      // Lazy render in chunks
+      const CHUNK_SIZE = 3000;
+      let currentIndex = 0;
+      setIsLoading(true);
+
+      const renderChunk = () => {
+        const endIndex = Math.min(currentIndex + CHUNK_SIZE, allNodes.length);
+        const nodeChunk = allNodes.slice(0, endIndex);
+        const edgeChunk = allEdges.filter((edge) =>
+          nodeChunk.some((n) => n.id === edge.target)
+        );
+
+        setNodes(nodeChunk);
+        setEdges(edgeChunk);
+        setLoadProgress(Math.round((endIndex / allNodes.length) * 100));
+
+        currentIndex = endIndex;
+
+        if (currentIndex < allNodes.length) {
+          animationFrameRef.current = requestAnimationFrame(renderChunk);
+        } else {
+          setIsLoading(false);
+          setLoadProgress(100);
+        }
+      };
+
+      renderChunk();
     },
     [expandedNodes]
   );
@@ -270,16 +305,55 @@ const HierarchyTree = React.memo(function HierarchyTree() {
     const nodePositions = nodePositionsRef.current;
     if (!tree || !nodePositions) return;
 
+    // Cancel any ongoing lazy load
+    if (animationFrameRef.current) {
+      cancelAnimationFrame(animationFrameRef.current);
+    }
+
     const visibleNodeIds = getVisibleNodesIterative(tree, expandedNodes);
     buildNodesAndEdges(visibleNodeIds, tree, nodePositions);
   }, [expandedNodes, buildNodesAndEdges]);
 
   useEffect(() => {
     rebuildTree();
+
+    // Cleanup on unmount
+    return () => {
+      if (animationFrameRef.current) {
+        cancelAnimationFrame(animationFrameRef.current);
+      }
+    };
   }, [rebuildTree]);
 
   return (
     <div style={{ width: '100vw', height: '100vh', position: 'relative' }}>
+      {/* Loading Progress Bar */}
+      {isLoading && (
+        <div
+          style={{
+            position: 'absolute',
+            top: 60,
+            left: 10,
+            right: 10,
+            zIndex: 1000,
+            height: '4px',
+            backgroundColor: '#e0e0e0',
+            borderRadius: '2px',
+            overflow: 'hidden',
+            maxWidth: '300px',
+          }}
+        >
+          <div
+            style={{
+              width: `${loadProgress}%`,
+              height: '100%',
+              backgroundColor: '#2196F3',
+              transition: 'width 0.2s ease',
+            }}
+          />
+        </div>
+      )}
+
       <div
         style={{
           position: 'absolute',
@@ -292,13 +366,14 @@ const HierarchyTree = React.memo(function HierarchyTree() {
       >
         <button
           onClick={expandAll}
+          disabled={isLoading}
           style={{
             padding: '8px 16px',
-            backgroundColor: '#4CAF50',
+            backgroundColor: isLoading ? '#ccc' : '#4CAF50',
             color: 'white',
             border: 'none',
             borderRadius: '4px',
-            cursor: 'pointer',
+            cursor: isLoading ? 'not-allowed' : 'pointer',
             fontSize: '14px',
             fontWeight: 'bold',
           }}
@@ -307,13 +382,14 @@ const HierarchyTree = React.memo(function HierarchyTree() {
         </button>
         <button
           onClick={collapseAll}
+          disabled={isLoading}
           style={{
             padding: '8px 16px',
-            backgroundColor: '#f44336',
+            backgroundColor: isLoading ? '#ccc' : '#f44336',
             color: 'white',
             border: 'none',
             borderRadius: '4px',
-            cursor: 'pointer',
+            cursor: isLoading ? 'not-allowed' : 'pointer',
             fontSize: '14px',
             fontWeight: 'bold',
           }}
@@ -340,7 +416,9 @@ const HierarchyTree = React.memo(function HierarchyTree() {
           minWidth: '120px',
         }}
       >
-        <div style={{ fontSize: '12px', marginBottom: '2px' }}>Nodes Loaded</div>
+        <div style={{ fontSize: '12px', marginBottom: '2px' }}>
+          {isLoading ? `Loading ${loadProgress}%` : 'Nodes Loaded'}
+        </div>
         <div style={{ fontSize: '20px' }}>{nodes.length}</div>
       </div>
 
